@@ -1,0 +1,94 @@
+# Build an .info site with the Info Agent's shared theme and upload it to the site's Ceph bucket
+# (info-agent docs/plan.md sections 5 and 8). The agent creates the bucket first with
+# `python -m info_agent bucket SITE --env ENV` and starts this workflow.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: Site, such as aspose.info
+        required: true
+      environment:
+        description: Where to deploy
+        type: choice
+        options: [qa, production]
+        default: qa
+
+concurrency: deploy-${{ inputs.site }}-${{ inputs.environment }}
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SITE: ${{ inputs.site }}
+      ENVIRONMENT: ${{ inputs.environment }}
+    steps:
+      - name: Check the site name
+        run: |
+          [[ "$SITE" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || { echo "::error::Not a site name: $SITE"; exit 1; }
+
+      - name: Check out the agent
+        uses: actions/checkout@v5
+        with:
+          repository: info-sites-org/info-agent
+          token: ${{ secrets.INFO_REPOS_PAT }}
+          path: agent
+
+      - name: Check out the site
+        uses: actions/checkout@v5
+        with:
+          repository: info-sites-org/${{ inputs.site }}
+          token: ${{ secrets.INFO_REPOS_PAT }}
+          path: site
+
+      - name: Install the profile's Hugo
+        run: |
+          version=$(sed -n 's/^hugo: *\([0-9.]*\).*/\1/p' "agent/sites/$SITE.yaml")
+          file="hugo_extended_${version}_linux-amd64.tar.gz"
+          base="https://github.com/gohugoio/hugo/releases/download/v${version}"
+          curl -fsSL -o "/tmp/$file" "$base/$file"
+          curl -fsSL "$base/hugo_${version}_checksums.txt" | grep " $file\$" | (cd /tmp && sha256sum -c -)
+          tar -xzf "/tmp/$file" -C /tmp hugo
+          sudo mv /tmp/hugo /usr/local/bin/hugo
+          hugo version
+
+      - name: Build
+        run: |
+          hugo -s site --themesDir "$GITHUB_WORKSPACE/agent/themes" --minify -d "$GITHUB_WORKSPACE/public"
+          mkdir -p public/.well-known
+          # What this build is, so the agent can prove the bucket serves it.
+          jq -n --arg site "$SITE" --arg environment "$ENVIRONMENT" \
+            --arg site_commit "$(git -C site rev-parse HEAD)" --arg agent_commit "$(git -C agent rev-parse HEAD)" \
+            --arg run "$GITHUB_RUN_ID" --arg built "$(date -u +%FT%TZ)" \
+            '{site: $site, environment: $environment, site_commit: $site_commit, agent_commit: $agent_commit, run: $run, built: $built}' \
+            > public/.well-known/info-agent.json
+          find public -type f | wc -l
+
+      - name: Upload to the bucket
+        env:
+          QA_KEY: ${{ secrets.CEPH_QA_ACCESS_KEY_ID }}
+          QA_SECRET: ${{ secrets.CEPH_QA_SECRET_ACCESS_KEY }}
+          QA_ENDPOINT: ${{ secrets.CEPH_QA_ENDPOINT }}
+          PRODUCTION_KEY: ${{ secrets.CEPH_PRODUCTION_ACCESS_KEY_ID }}
+          PRODUCTION_SECRET: ${{ secrets.CEPH_PRODUCTION_SECRET_ACCESS_KEY }}
+          PRODUCTION_ENDPOINT: ${{ secrets.CEPH_PRODUCTION_ENDPOINT }}
+          AWS_DEFAULT_REGION: ${{ secrets.CEPH_REGION }}
+          # Ceph rejects the checksums newer AWS CLIs add by default.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          if [ "$ENVIRONMENT" = qa ]; then
+            prefix=qa website=s3-website-qa.dynabic.com endpoint="$QA_ENDPOINT"
+            export AWS_ACCESS_KEY_ID="$QA_KEY" AWS_SECRET_ACCESS_KEY="$QA_SECRET"
+          else
+            prefix=www website=s3-website.dynabic.com endpoint="$PRODUCTION_ENDPOINT"
+            export AWS_ACCESS_KEY_ID="$PRODUCTION_KEY" AWS_SECRET_ACCESS_KEY="$PRODUCTION_SECRET"
+          fi
+          bucket="$prefix-${SITE//./-}"
+          aws configure set default.s3.max_concurrent_requests 64
+          aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --delete --no-progress --only-show-errors
+          echo "Deployed to https://$bucket.$website"
