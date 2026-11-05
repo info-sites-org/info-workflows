@@ -58,6 +58,11 @@ jobs:
 
       - name: Build
         run: |
+          # QA never goes to search engines; production only once the profile says `live: true`,
+          # after the owner's "go live" (info-agent DECISIONS.md I-017).
+          if [ "$ENVIRONMENT" = qa ] || ! grep -q '^live: *true' "agent/sites/$SITE.yaml"; then
+            export HUGO_PARAMS_NOINDEX=true
+          fi
           hugo -s site --themesDir "$GITHUB_WORKSPACE/agent/themes" --minify -d "$GITHUB_WORKSPACE/public"
           mkdir -p public/.well-known
           # What this build is, so the agent can prove the bucket serves it.
