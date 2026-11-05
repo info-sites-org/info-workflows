@@ -95,5 +95,9 @@ jobs:
           fi
           bucket="$prefix-${SITE//./-}"
           aws configure set default.s3.max_concurrent_requests 64
-          aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --delete --no-progress --only-show-errors
+          # The CDN passes these on to browsers; without them it tells browsers to keep every page for
+          # 30 days. Pages are rechecked after 5 minutes, so a deploy reaches returning readers.
+          # Fingerprinted CSS and JS, and fonts, keep the long time; old ones stay for cached pages.
+          aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --delete --no-progress --only-show-errors             --cache-control "public, max-age=300" --exclude "fonts/*" --exclude "info.min.*"
+          aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --no-progress --only-show-errors             --cache-control "public, max-age=2592000" --exclude "*" --include "fonts/*" --include "info.min.*"
           echo "Deployed to https://$bucket.$website"
