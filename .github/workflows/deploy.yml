@@ -94,10 +94,23 @@ jobs:
             export AWS_ACCESS_KEY_ID="$PRODUCTION_KEY" AWS_SECRET_ACCESS_KEY="$PRODUCTION_SECRET"
           fi
           bucket="$prefix-${SITE//./-}"
+          # Files another agent owns are neither uploaded nor deleted. With `homepage: homepages-agent`
+          # in the profile (info-agent DECISIONS.md I-033), the Homepages Agent owns the home page in
+          # every language (each folder with a search index), its identity file and /homepage/.
+          keep=()
+          if grep -q '^homepage: *homepages-agent' "agent/sites/$SITE.yaml"; then
+            keep=(--exclude index.html --exclude ".well-known/homepages-deployment.json" --exclude "homepage/*")
+            for index in public/*/search.json; do
+              folder="${index#public/}"
+              keep+=(--exclude "${folder%search.json}index.html")
+            done
+            echo "Leaving $(( ${#keep[@]} / 2 )) paths to the Homepages Agent"
+          fi
           aws configure set default.s3.max_concurrent_requests 64
           # The CDN passes these on to browsers; without them it tells browsers to keep every page for
           # 30 days. Pages are rechecked after 5 minutes, so a deploy reaches returning readers.
           # Fingerprinted CSS and JS, and fonts, keep the long time; old ones stay for cached pages.
-          aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --delete --no-progress --only-show-errors             --cache-control "public, max-age=300" --exclude "fonts/*" --exclude "info.min.*"
+          # Only the first sync deletes, so only it needs to leave the other agent's files alone.
+          aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --delete --no-progress --only-show-errors             --cache-control "public, max-age=300" --exclude "fonts/*" --exclude "info.min.*" "${keep[@]}"
           aws s3 sync public "s3://$bucket" --endpoint-url "$endpoint" --no-progress --only-show-errors             --cache-control "public, max-age=2592000" --exclude "*" --include "fonts/*" --include "info.min.*"
           echo "Deployed to https://$bucket.$website"
