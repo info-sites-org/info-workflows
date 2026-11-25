@@ -1,0 +1,98 @@
+# The Info Agent's daily run and weekly report (info-agent DECISIONS.md I-040). Every day it drafts each
+# site's new pages from checked facts and saves them on the agent blog for an owner's review; on Mondays it
+# also saves the week's report there. Nothing here publishes a page: an owner reviews every draft (I-026).
+name: Autopilot
+
+on:
+  schedule:
+    - cron: "30 1 * * *"              # every day at 01:30 UTC
+  workflow_dispatch:
+    inputs:
+      job:
+        description: What to run
+        type: choice
+        options: [daily, report]
+        default: daily
+
+concurrency: autopilot
+permissions:
+  contents: read
+  actions: write                      # to keep this schedule on (GitHub turns off a public repo's after 60 quiet days)
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      PROFESSIONALIZE_BASE_URL: ${{ secrets.PROFESSIONALIZE_BASE_URL }}
+      PROFESSIONALIZE_API_SERVICE_KEY: ${{ secrets.PROFESSIONALIZE_API_SERVICE_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      WORDPRESS_API_CLIENT_ID: ${{ secrets.WORDPRESS_API_CLIENT_ID }}
+      WORDPRESS_API_CLIENT_SECRET: ${{ secrets.WORDPRESS_API_CLIENT_SECRET }}
+      WORDPRESS_API_USERNAME: ${{ secrets.WORDPRESS_API_USERNAME }}
+      WORDPRESS_API_PASSWORD: ${{ secrets.WORDPRESS_API_PASSWORD }}
+    steps:
+      - name: Check out the agent
+        uses: actions/checkout@v5
+        with:
+          repository: info-sites-org/info-agent
+          token: ${{ secrets.INFO_REPOS_PAT }}
+          path: agent
+          fetch-depth: 0              # the report lists the week's commits
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install -q -r agent/requirements.txt
+          printf '%s' "$GOOGLE_KEY" > agent/.env.google.json
+        env:
+          GOOGLE_KEY: ${{ secrets.GOOGLE_KEY }}
+
+      - name: Draft the day's pages
+        if: github.event_name == 'schedule' || inputs.job == 'daily'
+        working-directory: agent
+        run: |
+          failed=0
+          for file in sites/*.yaml; do
+            site=$(basename "$file" .yaml)
+            echo "::group::$site"
+            python -m info_agent daily "$site" || { echo "::error::the daily run failed on $site"; failed=1; }
+            echo "::endgroup::"
+          done
+          echo "FAILED=$failed" >> "$GITHUB_ENV"
+
+      - name: Save the week's report
+        if: github.event_name == 'schedule' || inputs.job == 'report'
+        working-directory: agent
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$(date -u +%u)" != 1 ]; then
+            echo "The report is saved on Mondays"; exit 0
+          fi
+          python -m info_agent report
+
+      - name: Keep the drafts in the agent repo
+        if: always()
+        working-directory: agent
+        run: |
+          rm -f .env.google.json
+          git add drafts reviews 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git -c user.name="Info Agent" -c user.email="info-agent@users.noreply.github.com" commit -q \
+            -m "Daily drafts for $(date -u +%F) (I-040)" \
+            -m "What: the day's drafts, their facts and sources, and the run's log, from the Autopilot workflow." \
+            -m "Why: Salman's daily run (DECISIONS.md I-040); each draft waits for an owner's review (I-026)." \
+            -m "Proof: run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git pull -q --rebase origin main && git push -q origin HEAD:main
+
+      - name: Keep the schedule on
+        if: github.event_name == 'schedule'
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/autopilot.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Fail when a site's run failed
+        if: env.FAILED == '1'
+        run: exit 1
