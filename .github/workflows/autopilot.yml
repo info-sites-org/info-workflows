@@ -78,7 +78,7 @@ jobs:
         working-directory: agent
         run: |
           rm -f .env.google.json
-          git add drafts reviews 2>/dev/null || true
+          for dir in drafts reviews; do [ -d "$dir" ] && git add "$dir"; done  # one missing folder stops a joint add
           git diff --cached --quiet && exit 0
           git -c user.name="Info Agent" -c user.email="info-agent@users.noreply.github.com" commit -q \
             -m "Daily drafts for $(date -u +%F) (I-040)" \
